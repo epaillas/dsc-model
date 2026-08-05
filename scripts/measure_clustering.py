@@ -4,7 +4,17 @@ Measure the matter power-spectrum multipoles from periodic-box positions.
 
 import argparse
 from pathlib import Path
+
 import numpy as np
+
+
+def discover_realizations(model_dir: Path) -> list[int]:
+    """Return available numeric realization directory names in numeric order."""
+    return sorted(
+        int(path.name)
+        for path in model_dir.glob("*")
+        if path.is_dir() and path.name.isdigit()
+    )
 
 
 def read_snapshot(
@@ -134,7 +144,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--realizations", type=int, nargs="+", required=True)
+    parser.add_argument(
+        "--realizations",
+        type=int,
+        nargs="+",
+        help=(
+            "Realization IDs to process. If omitted, process every numeric "
+            "directory under <input-root>/<model>."
+        ),
+    )
     parser.add_argument(
         "--todo",
         choices=("pmm", "pqm", "pqq"),
@@ -155,10 +173,21 @@ def main() -> None:
     import hdf5plugin  # noqa: F401
     import h5py
 
-    for realization in args.realizations:
+    model_dir = args.input_root / args.model
+    realizations = args.realizations
+    if realizations is None:
+        realizations = discover_realizations(model_dir)
+        if not realizations:
+            raise FileNotFoundError(
+                f"no numeric realization directories in {model_dir}"
+            )
+        print(
+            f"Discovered {len(realizations)} realizations in {model_dir}."
+        )
+
+    for realization in realizations:
         snapshot_dir = (
-            args.input_root
-            / args.model
+            model_dir
             / str(realization)
             / f"snapdir_{args.snapshot:03d}"
         )
