@@ -1254,6 +1254,7 @@ def sample(
     from desilike import compile, get_params
     from desilike.samplers import MH, Sampler
 
+    graph = compile(likelihood)
     start = None
     if start_from_bestfit:
         if proposal is None:
@@ -1264,7 +1265,7 @@ def sample(
         if missing:
             raise ValueError(f"profile best fit is missing varied parameters: {missing}")
         start = {name: bestfit[name] for name in names}
-        if not np.isfinite(list(start.values())).all() or not np.isfinite(likelihood(**start)):
+        if not np.isfinite(list(start.values())).all() or not np.isfinite(graph(start)):
             raise ValueError("profile best fit must have finite values and posterior")
 
     if start is not None:
@@ -1272,7 +1273,7 @@ def sample(
             param.update(value=start[param.name], ref={})
     chain_dir = output_dir / (f"chains_{output_hash}" if output_hash else "chains")
     sampler = Sampler(
-        compile(likelihood), kernel=MH(), nparallel=chains, rng=seed,
+        graph, kernel=MH(), nparallel=chains, rng=seed,
         output_dir=chain_dir, proposal=proposal,
     )
     return sampler.run(
@@ -1376,7 +1377,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--start-from-bestfit", action="store_true",
         help="start every chain at the profile best fit; with --method sample, "
-             "load profiles_<fit-hash>.npy from --output-dir; with both, use the fresh profile",
+             "load profiles_<fit-hash>.h5 from --output-dir; with both, use the fresh profile",
     )
     parser.add_argument(
         "--no-emulator",
@@ -1401,6 +1402,8 @@ def parse_args(argv=None):
         help="fix selected cosmological parameters to Quijote values; reuse existing emulators",
     )
     args = parser.parse_args(argv)
+    if args.emulator == "mlp":
+        parser.error("MLP emulation is not yet ported to the refactor-jax desilike API")
     args.direct_cosmology = args.no_emulator or args.cosmo_engine is not None
     if args.no_emulator:
         if args.cosmo_engine not in (None, "class"):
@@ -1603,7 +1606,7 @@ def main(argv=None) -> None:
     profiles = None
     if args.method in ("profile", "both"):
         profiles = profile(
-            likelihood, args.output_dir / f"profiles_{output_hash}.npy", seed=args.seed
+            likelihood, args.output_dir / f"profiles_{output_hash}.h5", seed=args.seed
         )
         bestfit = _bestfit_values(profiles)
         from desilike import compile
@@ -1630,7 +1633,7 @@ def main(argv=None) -> None:
         if args.start_from_bestfit and profiles is None:
             from desilike.samples import Profiles
 
-            profile_path = args.output_dir / f"profiles_{output_hash}.npy"
+            profile_path = args.output_dir / f"profiles_{output_hash}.h5"
             if not profile_path.is_file():
                 raise FileNotFoundError(
                     f"no profile best fit found at {profile_path}; "

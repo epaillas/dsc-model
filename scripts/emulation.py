@@ -102,7 +102,8 @@ def matter_cache_options(k, *, redshift, ells, rsd, cache_version=2,
 def emulator_path(output_dir, options):
     serialized = json.dumps(options, sort_keys=True, separators=(",", ":"), allow_nan=False)
     digest = hashlib.sha256(serialized.encode()).hexdigest()[:8]
-    return Path(output_dir) / f"pmm_emulator_{digest}.npy"
+    suffix = ".h5" if options["emulator"]["engine"] == "TaylorEmulatorEngine" else ".npy"
+    return Path(output_dir) / f"pmm_emulator_{digest}{suffix}"
 
 
 def sobol_points(config):
@@ -175,97 +176,46 @@ def report_accuracy(report, path):
 
 
 def get_or_train_emulator(output_dir, options, build_exact):
-    from desilike.emulators import Emulator, EmulatedCalculator, TaylorEmulatorEngine
+    from desilike import compile
+    from desilike.emulators import TaylorEmulator
 
     path = emulator_path(output_dir, options)
     path.parent.mkdir(parents=True, exist_ok=True)
     settings = options["emulator"]
     is_mlp = settings["engine"] == "MLPEmulatorEngine"
-    report_path = path.with_suffix(".json")
-    if path.exists() or (is_mlp and report_path.exists()):
+    if is_mlp:
+        raise NotImplementedError(
+            "MLP emulation is not yet ported to the refactor-jax desilike API"
+        )
+    if settings.get("method") != "finite":
+        raise ValueError("the refactored Taylor emulator supports method='finite' only")
+
+    legacy_path = path.with_suffix(".npy")
+    if path.exists():
         try:
-            if is_mlp:
-                report = json.loads(report_path.read_text())
-                if report["configuration"] != options:
-                    raise ValueError(f"incompatible configuration in {report_path}")
-                if report["model_sha256"] != hashlib.sha256(path.read_bytes()).hexdigest():
-                    raise ValueError(f"model checksum does not match {report_path}")
-                metrics = report["validation"]
-                if (metrics["nvalidation"] != settings["validation"]["nrandom"] + 10
-                        or set(metrics["by_ell"]) != set(map(str, options["ells"]))):
-                    raise ValueError(f"incompatible validation in {report_path}")
-                values = [v for group in [metrics["overall"], *metrics["by_ell"].values()]
-                          for v in (group["max"], group["rms"], group["p99"])]
-                if not np.isfinite(values).all() or min(values) < 0:
-                    raise ValueError(f"invalid validation metrics in {report_path}")
-            calculator = EmulatedCalculator.load(str(path))
-            if is_mlp:
-                power = np.asarray(calculator())
-                if not np.isfinite(power).all() or not (power > 0).all():
-                    raise ValueError("non-finite or non-positive loaded MLP prediction")
-                report_accuracy(report, path)
-            return calculator
+            calculator = TaylorEmulator.read(str(path)).to_calculator()
         except Exception as exc:
-            raise RuntimeError(f"failed to load cached pmm emulator {path}"
-                               f"{(' / ' + str(report_path)) if is_mlp else ''}; "
-                               "remove this artifact and rerun to regenerate it") from exc
+            raise RuntimeError(
+                f"failed to load cached pmm Taylor emulator {path}; "
+                "remove this artifact and rerun to regenerate it"
+            ) from exc
+        legacy_path.unlink(missing_ok=True)
+        return calculator
 
     exact = build_exact()
-    if not is_mlp:
-        emulator = Emulator(exact, engine=TaylorEmulatorEngine(
-            **{name: settings[name] for name in ("order", "accuracy", "method")}))
-        emulator.set_samples()
-        emulator.fit()
-        emulator.save(str(path))
-        return emulator.to_calculator()
+    emulator = TaylorEmulator(
+        compile(exact), order=settings["order"], fd_acc=settings["accuracy"]
+    )
+    emulator.fit()
 
-    from desilike.emulators import MLPEmulatorEngine, Log10Operation
-
-    # Initialize inside the training domain even if it excludes the model defaults.
-    apply_mlp_priors(exact, settings)
-    if set(exact.varied_params.names()) != set(COSMOLOGY_NAMES):
-        raise ValueError("MLP matter training requires all five cosmological parameters")
-    engine = MLPEmulatorEngine(
-        nhidden=tuple(settings["nhidden"]), activation=settings["activation"],
-        yoperation=Log10Operation())
-    emulator = Emulator(exact, engine=engine)
-    print(f"Training matter MLP: {settings['ntrain']} Sobol cosmologies; cache {path}", flush=True)
     try:
-        samples = evaluate_samples(exact, sobol_points(settings))
-        # This desilike version's explicit-samples branch expects cosmoprimo
-        # columns(), but its conversion hook expects desilike Samples. Supply
-        # our already-evaluated samples through the engine's sampling hook;
-        # never invoke the default 100,000-point proposal-based sampler.
-        engine.get_default_samples = lambda calculator, **kwargs: samples
-        try:
-            emulator.set_samples()
-        finally:
-            del engine.get_default_samples
-        emulator.fit(**settings["training"])
-        calculator = emulator.to_calculator()
-        points = validation_points(settings)
-        print(f"Validating matter MLP against {len(points)} independent exact cosmologies", flush=True)
-        truth = evaluate_samples(exact, points)
-        prediction = evaluate_samples(calculator, points)
-        publication_error = None
-        if exact.mpicomm.rank == 0:
-            try:
-                validation = validate_predictions(truth["power"], prediction["power"], options["ells"])
-                # Publish the report last, tying it to the actual serialized model.
-                with tempfile.TemporaryDirectory(dir=path.parent, prefix=".mlp-") as staging:
-                    staged = Path(staging) / path.name
-                    emulator.save(str(staged), yaml=False)
-                    report = dict(configuration=options, validation=validation,
-                                  model_sha256=hashlib.sha256(staged.read_bytes()).hexdigest())
-                    staged.with_suffix(".json").write_text(json.dumps(report, indent=2, allow_nan=False))
-                    for suffix in (".npy", ".json"):
-                        os.replace(staged.with_suffix(suffix), path.with_suffix(suffix))
-                report_accuracy(report, path)
-            except Exception as exc:
-                publication_error = str(exc)
-        publication_error = exact.mpicomm.bcast(publication_error, root=0)
-        if publication_error:
-            raise RuntimeError(publication_error)
+        with tempfile.TemporaryDirectory(dir=path.parent, prefix=".taylor-") as staging:
+            staged = Path(staging) / path.name
+            emulator.write(str(staged))
+            calculator = TaylorEmulator.read(str(staged)).to_calculator()
+            os.replace(staged, path)
     except Exception as exc:
-        raise RuntimeError(f"MLP training/validation failed for {path}: {exc}") from exc
+        raise RuntimeError(f"Taylor emulator publication failed for {path}: {exc}") from exc
+
+    legacy_path.unlink(missing_ok=True)
     return calculator
