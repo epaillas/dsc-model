@@ -257,7 +257,6 @@ def test_cli_defaults_sequential_ids_and_variants(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize('arguments', [[], ['--realizations','0'],
-    ['--snapshot-root','s','--output-dir','o'],
     ['--snapshot-root','s','--output-dir','o','--realizations','-1'],
     ['--snapshot-root','s','--output-dir','o','--realizations','0','0'],
     ['--snapshot-root','s','--output-dir','o','--realizations','0','--analysis-mesh','128'],
@@ -267,6 +266,33 @@ def test_cli_rejects_invalid_arguments(arguments):
     with pytest.raises(SystemExit) as error:
         measurement.main(arguments)
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize('order', [2, 3])
+def test_cli_discovers_numeric_directories(monkeypatch, tmp_path, capsys, order):
+    for name in ('10', '2', '0', 'notes'):
+        (tmp_path/name).mkdir()
+    (tmp_path/'3').touch()
+    calls = []
+    monkeypatch.setattr(measurement, 'measure', lambda *args, **kwargs: calls.append((args, kwargs)))
+    measurement.main(['--snapshot-root', str(tmp_path), '--output-dir', str(tmp_path/'output'),
+                      '--analysis-mesh', '512', '--precision', 'float32',
+                      '--operator-order', str(order)])
+    assert [args[1] for args, _ in calls] == [0, 2, 10]
+    assert all(args[0] == tmp_path and args[2] == tmp_path/'output' for args, _ in calls)
+    assert all(kwargs == dict(analysis_mesh=512, precision='float32', operator_order=order)
+               for _, kwargs in calls)
+    assert 'Discovered 3 realizations' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('missing', [False, True])
+def test_cli_discovery_requires_realizations(monkeypatch, tmp_path, missing):
+    root = tmp_path/'missing' if missing else tmp_path
+    def unexpected_measure(*args, **kwargs):
+        pytest.fail('measurement should not run without realizations')
+    monkeypatch.setattr(measurement, 'measure', unexpected_measure)
+    with pytest.raises(FileNotFoundError, match='no numeric realization directories'):
+        measurement.main(['--snapshot-root', str(root), '--output-dir', str(tmp_path/'output')])
 
 
 @pytest.mark.parametrize('order', [2, 3])

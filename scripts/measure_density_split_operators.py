@@ -13,6 +13,7 @@ import time
 
 import numpy as np
 from scipy.special import eval_legendre
+from scripts.measure_clustering import discover_realizations
 from scripts.measure_quijote_acm import inspect_snapshot, read_snapshot
 
 FIELDS = ('m', 'O1', 'O2', 'q1', 'q2', 'q4', 'q5')
@@ -251,15 +252,25 @@ def main(argv=None):
     parser.add_argument('--snapshot-root', type=Path, required=True,
                         help='Directory containing numeric fiducial realization directories')
     parser.add_argument('--output-dir', type=Path, required=True)
-    parser.add_argument('--realizations', type=int, nargs='+', required=True)
+    parser.add_argument('--realizations', type=int, nargs='+',
+                        help='Realization IDs to process. If omitted, process every numeric '
+                             'directory under --snapshot-root.')
     parser.add_argument('--analysis-mesh', type=int, choices=(256, 512), default=256)
     parser.add_argument('--precision', choices=('float64', 'float32'), default='float64')
     parser.add_argument('--operator-order', type=int, choices=(2, 3), default=2,
                         help='Highest selection-operator order (default: 2)')
     args = parser.parse_args(argv)
-    if any(i < 0 for i in args.realizations) or len(set(args.realizations)) != len(args.realizations):
+    realizations = args.realizations
+    if realizations is None:
+        realizations = discover_realizations(args.snapshot_root)
+        if not realizations:
+            raise FileNotFoundError(
+                f'no numeric realization directories in {args.snapshot_root}'
+            )
+        print(f'Discovered {len(realizations)} realizations in {args.snapshot_root}.', flush=True)
+    if any(i < 0 for i in realizations) or len(set(realizations)) != len(realizations):
         parser.error('realizations must be distinct nonnegative integers')
-    for realization in args.realizations:
+    for realization in realizations:
         measure(args.snapshot_root, realization, args.output_dir,
                 analysis_mesh=args.analysis_mesh, precision=args.precision,
                 operator_order=args.operator_order)
