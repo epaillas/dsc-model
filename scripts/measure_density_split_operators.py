@@ -121,11 +121,12 @@ def measure(snapshot_root, realization, output_dir, analysis_mesh=256, precision
         raise ValueError('expected z=0.5, L=1000 snapshot')
     if not np.allclose([header['omega_m'], header['hubble_param']], [.3175, .6711]):
         raise ValueError('expected fiducial Quijote cosmology')
-    identity = dict(version=3, realization=realization, header=header, software=software_metadata(),
+    identity = dict(version=4, realization=realization, header=header, software=software_metadata(),
         sources=[dict(path=str(p.resolve()), size=p.stat().st_size, mtime_ns=p.stat().st_mtime_ns) for p in files],
         selection_mesh=256, radius=10., selection='cic, uncompensated, no interlacing; CIC lattice readout',
         analysis_mesh=analysis_mesh, precision=precision, painting='tsc compensated, interlacing=0',
-        los='z', ells=[0, 2, 4], edges=(np.arange(16)*.01).tolist(), fields=FIELDS)
+        los='z', rsd_velocity_conversion='v_pec = sqrt(a) * stored_velocity',
+        ells=[0, 2, 4], edges=(np.arange(16)*.01).tolist(), fields=FIELDS)
     # JSON round trip makes tuple/list comparisons stable.
     identity = json.loads(json.dumps(identity))
     path = Path(output_dir)/f'operators_{realization:05d}_{analysis_mesh}_{precision}.npz'

@@ -186,8 +186,11 @@ def read_snapshot(
 
     positions = np.empty((header["total_particles"], 3), dtype="f4")
     los_axis = {"x": 0, "y": 1, "z": 2}[los]
+    scale_factor = 1.0 / (1.0 + header["redshift"])
     rsd_factor = np.float32(
-        (1 + header["redshift"]) / header["hubble_z_km_s_mpc_h"]
+        np.sqrt(scale_factor)
+        * (1.0 + header["redshift"])
+        / header["hubble_z_km_s_mpc_h"]
     )
     offset = 0
     for filename in files:
@@ -197,6 +200,7 @@ def read_snapshot(
             coordinates.read_direct(positions, dest_sel=np.s_[offset:end])
             positions[offset:end] /= np.float32(1e3)
             if rsd:
+                # Gadget stores v_pec / sqrt(a); convert before the RSD shift.
                 velocities = handle["PartType1/Velocities"][:, los_axis]
                 positions[offset:end, los_axis] += velocities * rsd_factor
         offset = end

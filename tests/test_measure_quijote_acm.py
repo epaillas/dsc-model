@@ -197,6 +197,33 @@ class MeasureQuijoteAcmTest(unittest.TestCase):
                 atol=2e-7,
             )
 
+    def test_gadget_velocity_conversion_at_nonzero_redshift(self) -> None:
+        from scripts.measure_clustering import read_snapshot as clustering_reader
+
+        coordinates = np.array([[499800., 499800., 499800.],
+                                [500200., 500200., 500200.]], dtype='f4')
+        velocities = np.array([[100., 200., 300.], [-100., -200., -300.]], dtype='f4')
+        hubble = 100 * np.sqrt(.3175 * 1.5**3 + .6825)
+        header = dict(total_particles=2, redshift=.5,
+                      hubble_z_km_s_mpc_h=hubble, boxsize_mpc_h=1000.)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'snapshot.hdf5'
+            write_part(path, coordinates, part_count=2, total=2,
+                       num_files=1, boxsize=1e6, velocities=velocities)
+            before = path.read_bytes()
+            for reader in (MODULE.read_snapshot, clustering_reader):
+                for axis, los in enumerate('xyz'):
+                    for rsd in (False, True):
+                        with self.subTest(reader=reader.__module__, los=los, rsd=rsd):
+                            expected = coordinates.astype('f8') / 1000.
+                            if rsd:
+                                peculiar = velocities.astype('f8') * np.sqrt(2./3.)
+                                expected[:, axis] += peculiar[:, axis] / ((2./3.) * hubble)
+                            expected = (expected + 500.) % 1000. - 500.
+                            actual = reader([path], header, los=los, rsd=rsd)
+                            np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-4)
+            self.assertEqual(path.read_bytes(), before)
+
     def test_rejects_incomplete_unreadable_and_inconsistent_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

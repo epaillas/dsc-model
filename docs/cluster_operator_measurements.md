@@ -44,9 +44,13 @@ python -m scripts.measure_density_split_operators \
 The input is `0/snapdir_003/snap_003.*.hdf5`, validated as a complete snapshot
 at z=0.5, box size 1000 Mpc/h, fiducial Quijote cosmology. Positions and velocities
 are read by `scripts/measure_quijote_acm.py`. Its RSD convention uses the stored
-velocity component times `(1+z)/[100 sqrt(Omega_m (1+z)^3 + Omega_Lambda)]`.
-No additional velocity conversion is applied. Verify this against the provenance
-of the existing cluster measurements before interpreting comparisons.
+velocity component times `sqrt(a) * (1+z)/[100 sqrt(Omega_m (1+z)^3 + Omega_Lambda)]`,
+where `a=1/(1+z)`. Gadget stores `v_pec/sqrt(a)`, so the sqrt(a) factor converts
+to peculiar velocities. This matches the cluster's locally preserved
+`stash@{0}` version of `scripts/measure_clustering.py` at
+`ae3f2cf9b7817d54047f1f559a97adc2ad8c11ab`. Operator cache identity version 4
+records this conversion. Use a separate output directory when remeasuring;
+version-3 outputs used the missing-factor reader and must be preserved for comparison.
 
 The selection is always CIC, uncompensated, without interlacing, on a 256^3
 mesh, with Gaussian smoothing R=10 Mpc/h and CIC readout at lattice queries.
@@ -119,8 +123,11 @@ using the empirical single-realization covariance from 1,500 realizations:
 | Joint | 197.716 |
 
 A native ACM Pqm calculation agreed with the helper to delta chi2=5.4e-7.
-Thus the snapshot/measurement convention mismatch remains unresolved; these
-numbers are not evidence against the quadratic selection model.
+The published readers at `bdc35d3` omitted the sqrt(a) conversion present in the
+preserved cluster script. The readers now include it, but the corrected spectra
+have not yet passed the numerical reproduction gate. These discrepancy numbers
+describe the uncorrected measurements and are not evidence against the quadratic
+selection model.
 
 The cluster session must first establish snapshot identity, velocity units/RSD
 conversion, smoothing, painting and quantile conventions from provenance.
