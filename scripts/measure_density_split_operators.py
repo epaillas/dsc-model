@@ -16,6 +16,9 @@ from scipy.special import eval_legendre
 from scripts.measure_quijote_acm import inspect_snapshot, read_snapshot
 
 FIELDS = ('m', 'O1', 'O2', 'q1', 'q2', 'q4', 'q5')
+CUBIC_FIELDS = FIELDS + ('O3',)
+OPERATOR_DEFINITIONS = dict(O1='s', O2='(s**2 - mean(s**2)) / 2',
+                            O3='(s**3 - mean(s**3)) / 6')
 REALIZATIONS = (0, 1, 10, 100, 1000, 10000, 10001, 10002, 10003, 10004)
 
 
@@ -101,16 +104,30 @@ def load_cache(path, identity):
         if json.loads(str(cached['identity'])) != identity:
             return None
         result = {key: cached[key] for key in cached.files}
-    if result['power'].shape != (7, 7, 3, 15) or not all(
+    fields = tuple(identity.get('fields', ()))
+    order = identity.get('operator_order', 2)
+    expected_fields = {2: FIELDS, 3: CUBIC_FIELDS}.get(order)
+    if (fields != expected_fields or identity.get('version') != {2: 4, 3: 5}.get(order)
+            or result['power'].shape != (len(fields), len(fields), 3, 15)
+            or result['k'].shape != (15,) or result['nmodes'].shape != (15,)
+            or result['fractions'].shape != (5,)) or not all(
             np.isfinite(result[key]).all() for key in ('power', 'k', 'nmodes', 'fractions')):
         raise ValueError('invalid cached spectral matrix or geometry')
     return result
 
 
-def measure(snapshot_root, realization, output_dir, analysis_mesh=256, precision='float64'):
+def cubic_operator(s):
+    """Finite-smoothing O3: subtract only the cubic mean, with a factor 1/6."""
+    cube = np.asarray(s)**3
+    return (cube-cube.mean())/6.
+
+
+def measure(snapshot_root, realization, output_dir, analysis_mesh=256, precision='float64',
+            operator_order=2):
     """Cache spectra only; selection is always the original 256^3 field."""
-    if realization < 0 or analysis_mesh not in (256, 512) or precision not in ('float64', 'float32'):
-        raise ValueError('invalid realization, analysis mesh or precision')
+    if (realization < 0 or analysis_mesh not in (256, 512)
+            or precision not in ('float64', 'float32') or operator_order not in (2, 3)):
+        raise ValueError('invalid realization, analysis mesh, precision or operator order')
     import jax
     jax.config.update('jax_enable_x64', True)
     from jaxpower import MeshAttrs, ParticleField
@@ -121,21 +138,25 @@ def measure(snapshot_root, realization, output_dir, analysis_mesh=256, precision
         raise ValueError('expected z=0.5, L=1000 snapshot')
     if not np.allclose([header['omega_m'], header['hubble_param']], [.3175, .6711]):
         raise ValueError('expected fiducial Quijote cosmology')
-    identity = dict(version=4, realization=realization, header=header, software=software_metadata(),
+    fields = FIELDS if operator_order == 2 else CUBIC_FIELDS
+    identity = dict(version=4 if operator_order == 2 else 5, operator_order=operator_order,
+        operator_definitions={name: OPERATOR_DEFINITIONS[name] for name in fields if name.startswith('O')},
+        realization=realization, header=header, software=software_metadata(),
         sources=[dict(path=str(p.resolve()), size=p.stat().st_size, mtime_ns=p.stat().st_mtime_ns) for p in files],
         selection_mesh=256, radius=10., selection='cic, uncompensated, no interlacing; CIC lattice readout',
         analysis_mesh=analysis_mesh, precision=precision, painting='tsc compensated, interlacing=0',
         los='z', rsd_velocity_conversion='v_pec = sqrt(a) * stored_velocity',
-        ells=[0, 2, 4], edges=(np.arange(16)*.01).tolist(), fields=FIELDS)
+        ells=[0, 2, 4], edges=(np.arange(16)*.01).tolist(), fields=fields)
     # JSON round trip makes tuple/list comparisons stable.
     identity = json.loads(json.dumps(identity))
-    path = Path(output_dir)/f'operators_{realization:05d}_{analysis_mesh}_{precision}.npz'
+    prefix = 'operators' if operator_order == 2 else 'operators3'
+    path = Path(output_dir)/f'{prefix}_{realization:05d}_{analysis_mesh}_{precision}.npz'
     cached = load_cache(path, identity)
     if cached is not None:
         print(f'Realization {realization}: using {path}', flush=True)
         return cached
     started = time.perf_counter()
-    print(f'Realization {realization}: loading snapshot ({analysis_mesh}, {precision})', flush=True)
+    print(f'Realization {realization}: loading snapshot (order {operator_order}, {analysis_mesh}, {precision})', flush=True)
     positions = read_snapshot(files, header, los='z', rsd=True)
     ds = DensitySplit(data_positions=positions, boxsize=1000., boxcenter=0., meshsize=256)
     ds.set_density_contrast(resampler='cic', interlacing=False, compensate=False, smoothing_radius=10.)
@@ -163,17 +184,29 @@ def measure(snapshot_root, realization, output_dir, analysis_mesh=256, precision
     o2 = .5*(s*s-np.mean(s*s))
     zero = float(np.mean(o2))
     modes.append(paint(query, o2, parent_mean))
-    del s, o2
+    del o2
+    if operator_order == 3:
+        o3 = cubic_operator(s)
+        cubic_mean = float(o3.mean())
+        cubic_modes = paint(query, o3, parent_mean)
+        del o3
+    del s
     partition = np.zeros_like(modes[0])
     for q in range(5):
         mode = paint(query[labels == q])
         partition += fractions[q]*mode
         if q != 2:
             modes.append(mode)
+    if operator_order == 3:
+        modes.append(cubic_modes)
     power = bins.matrix(modes)
     minimum = min(np.linalg.eigvalsh(power[:, :, 0, i]).min() for i in range(len(bins.k)))
     checks = dict(o2_mean=zero, partition_mode_max=float(np.abs(partition).max()),
                   monopole_min_eigenvalue=float(minimum))
+    if operator_order == 3:
+        checks['o3_mean'] = cubic_mean
+    if not np.isfinite(power).all() or not all(np.isfinite(value) for value in checks.values()):
+        raise RuntimeError('nonfinite spectra or field checks')
     if checks['partition_mode_max'] > 1.e-6 or minimum < -1.e-7*np.max(np.abs(power)):
         raise RuntimeError(f'field identity failed: {checks}')
     result = dict(power=power, k=bins.k, nmodes=bins.counts, fractions=fractions,
@@ -186,17 +219,27 @@ def measure(snapshot_root, realization, output_dir, analysis_mesh=256, precision
     return result
 
 
+def _quadratic_matrix(power):
+    power = np.asarray(power)
+    if power.ndim != 4 or power.shape[:2] != (7, 7):
+        raise ValueError('quadratic helpers require seven fields; use power[:7, :7] for cubic files')
+    return power
+
+
 def basis_from_matrix(power):
+    power = _quadratic_matrix(power)
     return np.array([power[1, 0], power[2, 0], power[1, 1], power[1, 2], power[2, 2]])
 
 
 def data_from_matrix(power):
+    power = _quadratic_matrix(power)
     return np.concatenate([power[3:, 0].ravel(),
         np.array([power[a, b] for a in range(3, 7) for b in range(a, 7)]).ravel()])
 
 
 def residual_matrix(power, c1, c2):
     """Rows are m,O1,O2,epsilon1,epsilon2,epsilon4,epsilon5."""
+    power = _quadratic_matrix(power)
     transform = np.eye(7)
     transform[3:, 1] = -np.asarray(c1)
     transform[3:, 2] = -np.asarray(c2)
@@ -211,12 +254,15 @@ def main(argv=None):
     parser.add_argument('--realizations', type=int, nargs='+', required=True)
     parser.add_argument('--analysis-mesh', type=int, choices=(256, 512), default=256)
     parser.add_argument('--precision', choices=('float64', 'float32'), default='float64')
+    parser.add_argument('--operator-order', type=int, choices=(2, 3), default=2,
+                        help='Highest selection-operator order (default: 2)')
     args = parser.parse_args(argv)
     if any(i < 0 for i in args.realizations) or len(set(args.realizations)) != len(args.realizations):
         parser.error('realizations must be distinct nonnegative integers')
     for realization in args.realizations:
         measure(args.snapshot_root, realization, args.output_dir,
-                analysis_mesh=args.analysis_mesh, precision=args.precision)
+                analysis_mesh=args.analysis_mesh, precision=args.precision,
+                operator_order=args.operator_order)
 
 
 if __name__ == '__main__':
